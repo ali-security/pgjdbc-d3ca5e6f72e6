@@ -8,6 +8,7 @@ package org.postgresql.core;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.postgresql.jdbc.EscapeSyntaxCallMode;
@@ -16,6 +17,7 @@ import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 import java.sql.SQLException;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -160,6 +162,128 @@ class ParserTest {
   @Test
   void unterminatedEscape() throws Exception {
     assertEquals("{oj ", Parser.replaceProcessing("{oj ", true, false));
+  }
+
+  /**
+   * A brace inside a literal, quoted identifier, dollar quote or comment does not end a JDBC
+   * escape, and the text after the arguments of {@code {fn ...}} is not copied up to the first
+   * brace either.
+   */
+  @Test
+  void escapeDoesNotEndAtBraceInsideLiteral() throws SQLException {
+    assertEquals("DATE '2020-}'", Parser.replaceProcessing("{d '2020-}'}", true, false));
+    assertEquals("TIME '20:00:}'", Parser.replaceProcessing("{t '20:00:}'}", true, false));
+    assertEquals("TIMESTAMP '2020-01-01 }'",
+        Parser.replaceProcessing("{ts '2020-01-01 }'}", true, false));
+    assertEquals("ESCAPE '}'", Parser.replaceProcessing("{escape '}'}", true, false));
+    assertEquals("t1 LEFT OUTER JOIN t2 ON t1.s = '}'",
+        Parser.replaceProcessing("{oj t1 LEFT OUTER JOIN t2 ON t1.s = '}'}", true, false));
+    assertEquals("t1 LEFT OUTER JOIN t2 ON t1.s = \"}\"",
+        Parser.replaceProcessing("{oj t1 LEFT OUTER JOIN t2 ON t1.s = \"}\"}", true, false));
+    assertEquals("t1 LEFT OUTER JOIN t2 ON t1.s = $$}$$",
+        Parser.replaceProcessing("{oj t1 LEFT OUTER JOIN t2 ON t1.s = $$}$$}", true, false));
+    assertEquals("cos(1) /* } */", Parser.replaceProcessing("{fn cos(1) /* } */}", true, false));
+    assertEquals("cos(1) -- }\n", Parser.replaceProcessing("{fn cos(1) -- }\n}", true, false));
+  }
+
+  /**
+   * A quoted value with doubled quotes must stay inside the literal of the escape: the escapes in
+   * it must not be translated, and it must not be able to move the closing quote.
+   */
+  @Test
+  void escapeKeepsQuotedValueInsideLiteral() throws SQLException {
+    assertEquals("DATE '}'' {fn ucase(''x'')} --'",
+        Parser.replaceProcessing("{d '}'' {fn ucase(''x'')} --'}", true, false));
+    assertEquals("DATE '}'' {fn ucase(''x'')} --'",
+        Parser.replaceProcessing("{d '}'' {fn ucase(''x'')} --'}", true, true));
+    assertEquals("t1 LEFT OUTER JOIN t2 ON t2.name = '}{fn locate(''a'',''b'',1)}'",
+        Parser.replaceProcessing(
+            "{oj t1 LEFT OUTER JOIN t2 ON t2.name = '}{fn locate(''a'',''b'',1)}'}", true, true));
+  }
+
+  @Test
+  void unterminatedLiteralInsideEscape() {
+    assertThrows(SQLException.class,
+        () -> Parser.replaceProcessing("{d '2020-01-01}", true, false));
+    assertThrows(SQLException.class,
+        () -> Parser.replaceProcessing("{fn cos(1) '}", true, false));
+  }
+
+  /**
+   * The backend treats every non-ASCII character as an identifier character, so the parser must
+   * agree with it on where a dollar quote starts.
+   */
+  @Test
+  void dollarQuoteUsesBackendIdentifierCharacters() throws SQLException {
+    // Non-ASCII characters that are not Java identifier characters can be part of a tag
+    assertBindCount(0, "SELECT $×$ ? $×$");
+    assertBindCount(0, "SELECT $a😀$ ? $a😀$");
+    assertEquals(1,
+        Parser.parseJdbcSql("SELECT $×$;$×$", true, true, true, false, false).size());
+    assertEquals("SELECT $×${fn ucase('a')}$×$",
+        Parser.replaceProcessing("SELECT $×${fn ucase('a')}$×$", true, true));
+    // A $ after a non-ASCII character continues the identifier
+    assertBindCount(1, "SELECT a×$$ ? $$");
+    assertBindCount(1, "SELECT 😀$$ ? $$");
+    // A control character does not continue an identifier
+    assertBindCount(0, "SELECT \u0001$$ ? $$");
+    // An unpaired surrogate is sent as ?, so it neither continues an identifier nor a tag
+    assertBindCount(0, "SELECT \uD800$$ ? $$");
+    assertBindCount(1, "SELECT $a\uD800$ ? $a\uD800$");
+  }
+
+  /**
+   * A doubled quote and a continuation on a new line do not end a single-quoted string, and the
+   * rest of the string follows the rules of its first part.
+   */
+  @Test
+  void singleQuotedStringFollowsBackendRules() throws SQLException {
+    assertBindCount(0, "SELECT E'a''\\' ? '");
+    assertBindCount(0, "SELECT E'a'\n'\\' ? '");
+    assertBindCount(0, "SELECT E'a'\r\n  '\\' ? '");
+    assertBindCount(0, "SELECT E'a' -- comment\n'\\' ? '");
+    assertBindCount(0, "SELECT E'a'\n\u000B'\\' ? '");
+    // Without a newline there is no continuation
+    assertBindCount(1, "SELECT E'a' '\\' ? '");
+    assertBindCount(1, "SELECT E'a' /* comment */\n'\\' ? '");
+    // A vertical tab and an unpaired surrogate end the identifier before E'
+    assertBindCount(0, "SELECT\u000BE'\\' ? '");
+    assertBindCount(0, "SELECT \uD800E'\\' ? '");
+    // Statement separators and escapes inside the string are left alone
+    assertEquals(1,
+        Parser.parseJdbcSql("SELECT E'a''\\'; SELECT 1; --'", true, true, true, false, false).size());
+    assertEquals("SELECT E'a''\\' {fn ucase(''x'')} '",
+        Parser.replaceProcessing("SELECT E'a''\\' {fn ucase(''x'')} '", true, true));
+  }
+
+  /**
+   * A subtracted argument that starts with a minus sign must not create a {@code --} comment.
+   */
+  @Test
+  void subtractedEscapeFunctionArgumentIsParenthesized() throws SQLException {
+    String right = Parser.replaceProcessing("{fn right('abc',-1)}", true, false);
+    assertEquals("substring('abc' from (length('abc')+1-(-1)))", right);
+    assertFalse(right.contains("--"), right);
+    String timestampdiff =
+        Parser.replaceProcessing("{fn timestampdiff(SQL_TSI_DAY,-a,b)}", true, false);
+    assertEquals("extract( day from ((b)-(-a)))", timestampdiff);
+    assertFalse(timestampdiff.contains("--"), timestampdiff);
+  }
+
+  @Test
+  @SuppressWarnings("deprecation")
+  void deprecatedEscapedFunctionsParenthesizeSubtractedArgument() throws SQLException {
+    assertEquals("substring('abc' from (length('abc')+1-(-1)))",
+        org.postgresql.jdbc.EscapedFunctions.sqlright(Arrays.asList("'abc'", "-1")));
+    assertEquals("extract( day from ((b)-(-a)))",
+        org.postgresql.jdbc.EscapedFunctions.sqltimestampdiff(
+            Arrays.asList("SQL_TSI_DAY", "-a", "b")));
+  }
+
+  private static void assertBindCount(int expected, String query) throws SQLException {
+    List<NativeQuery> qry = Parser.parseJdbcSql(query, true, true, true, false, false);
+    assertEquals(1, qry.size(), "number of statements in " + query);
+    assertEquals(expected, qry.get(0).bindPositions.length, "number of placeholders in " + query);
   }
 
   @Test
