@@ -32,8 +32,6 @@ on:
         description: Default test group (fast | slow | all)
         required: false
         default: fast
-  schedule:
-    - cron: "0 6 * * *"
 
 permissions:
   contents: read

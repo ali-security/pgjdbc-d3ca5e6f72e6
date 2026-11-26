@@ -1,6 +1,8 @@
 sudo: false
 language: java
 dist: trusty
+# pgjdbc 42.7.x settings.gradle.kts refuses to launch Gradle on anything older than Java 17
+jdk: openjdk17
 
 branches:
   except:
@@ -8,8 +10,15 @@ branches:
     - /^REL.*/
 
 before_script:
-  - psql -c "create user test with password 'test'" -U postgres
-  - psql -c 'create database test owner test;' -U postgres
+  # The Travis postgresql addon no longer starts a server on the current build image, so the
+  # project's own docker/postgres-server compose provides PostgreSQL (its post-startup.sh creates
+  # the test user/databases; it also enables SSL, XA and the 5433/5434 replicas).
+  - sudo systemctl stop postgresql
+  - (cd docker/postgres-server && PGV=$PG_VERSION CREATE_REPLICAS=yes docker compose up -d)
+  # Replicas start during the image's init phase, before the primary restarts on 5432: wait for both
+  - for i in $(seq 1 90); do (cd docker/postgres-server && docker compose exec -T pgdb pg_isready -h 127.0.0.1 -p 5434 && docker compose exec -T pgdb pg_isready -h 127.0.0.1 -p 5432) && break; sleep 2; done
+  - (cd docker/postgres-server && docker compose exec -T pgdb pg_isready -h 127.0.0.1 -p 5432 && docker compose logs)
+  - echo enable_ssl_tests=true > ssltest.local.properties
 
 env:
   global:
@@ -20,12 +29,10 @@ before_install:
 
 script:
   # make sure previous build artifacts are not used for subsequent builds
-  - rm -rf $HOME/.m2/repository/org/postgresql || true
+  - rm -rf $HOME/.m2/repository/org/postgresql
   - ./.travis/travis_build.sh
-  - ./.travis/travis_check_postgres_health.sh
-  # To avoid useless S3 cache updates (https://github.com/travis-ci/travis-ci/issues/1441#issuecomment-67607074)
-  #- mkdir /tmp/cache-trick
-  #- mv $HOME/.m2/repository/org/postgresql /tmp/cache-trick/
+  # Print every skipped test with its reason as the last output of the run
+  - python3 .github/seal-skip-report.py .
 
 before_cache:
   - F=CleanupGradleCache sh -x -c 'curl -O https://raw.githubusercontent.com/vlsi/cleanup-gradle-cache/v1.x/$F.java && javac -J-Xmx128m $F.java && java -Xmx128m $F'
@@ -50,8 +57,7 @@ cache:
 matrix:
   fast_finish: true
   include:
-    - addons:
-        postgresql: "9.6"
-      env:
-        - PG_VERSION=9.6
-        - TEST_CLIENTS=Y
+    - env:
+        - PG_VERSION=14
+        - REPLICATION=Y
+        - MVN_CUSTOM_ARGS="-PskipForbiddenApis -PskipOpenrewrite -Ps3.build.cache=false --no-build-cache"

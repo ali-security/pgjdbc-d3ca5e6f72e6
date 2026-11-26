@@ -1,12 +1,7 @@
 name: Release Drafter
 
 on:
-  push:
-    # branches to consider in the event; optional, defaults to all
-    branches:
-      - master
-      - 'release/**'
-  # pull_request_target allows PR from forks to access secrets, so please NEVER add pull_request_target
+  workflow_dispatch:
 
 jobs:
   update_release_draft:

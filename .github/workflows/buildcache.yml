@@ -1,13 +1,7 @@
 name: Seed build cache
 
 on:
-  push:
-    branches:
-      - '*'
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - 'appveyor.xml'
+  workflow_dispatch:
 
 permissions:
   contents: read
