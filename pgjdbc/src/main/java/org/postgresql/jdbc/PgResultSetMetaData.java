@@ -246,7 +246,9 @@ public class PgResultSetMetaData implements ResultSetMetaData, PGResultSetMetaDa
         hasSourceInfo = true;
       }
     }
-    sql.append(") vals ON (c.oid = vals.oid AND a.attnum = vals.attnum) ");
+    // The table oids are int4 literals. pg_catalog has no oid = int4 operator, so an unqualified =
+    // could resolve to an operator in another schema of the search_path.
+    sql.append(") vals ON (c.oid OPERATOR(pg_catalog.=) vals.oid AND a.attnum = vals.attnum) ");
 
     if (!hasSourceInfo) {
       fieldInfoFetched = true;
