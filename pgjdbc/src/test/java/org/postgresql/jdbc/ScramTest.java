@@ -19,6 +19,7 @@ import org.postgresql.util.PSQLState;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -123,6 +124,65 @@ class ScramTest {
     } catch (SQLException e) {
       assertEquals(expectedMessage, e.getMessage());
     }
+  }
+
+  /**
+   * A server whose SCRAM verifier advertises more PBKDF2 iterations than the client is willing to
+   * spend must be refused before the key derivation runs (CVE-2026-42198).
+   */
+  @Test
+  void scramMaxIterationsRejectsServerIterationCount() throws SQLException {
+    createRole("scram_iterations");
+
+    Properties props = new Properties();
+    PGProperty.USER.set(props, ROLE_NAME);
+    PGProperty.PASSWORD.set(props, "scram_iterations");
+    PGProperty.SCRAM_MAX_ITERATIONS.set(props, 1);
+
+    SQLException ex = assertThrows(SQLException.class, () -> TestUtil.openDB(props));
+    assertTrue(ex.getMessage().contains("exceeds the client-side limit"),
+        "Unexpected message: " + ex.getMessage());
+    assertEquals(PSQLState.CONNECTION_REJECTED.getState(), ex.getSQLState());
+  }
+
+  /**
+   * Counterpart of {@link #scramMaxIterationsRejectsServerIterationCount()}: the very same role
+   * authenticates fine once the ceiling covers the server's iteration count.
+   */
+  @Test
+  void scramMaxIterationsAllowsServerIterationCountWithinLimit() throws SQLException {
+    createRole("scram_iterations");
+
+    Properties props = new Properties();
+    PGProperty.USER.set(props, ROLE_NAME);
+    PGProperty.PASSWORD.set(props, "scram_iterations");
+    PGProperty.SCRAM_MAX_ITERATIONS.set(props, 100000);
+
+    try (Connection c = assertDoesNotThrow(() -> TestUtil.openDB(props));
+        Statement stmt = c.createStatement();
+        ResultSet rs = stmt.executeQuery("SELECT current_user")) {
+      assertTrue(rs.next());
+      assertEquals(ROLE_NAME, rs.getString(1));
+    }
+  }
+
+  /**
+   * A negative ceiling would silently disable the protection, so it is reported as a bad
+   * connection property instead.
+   */
+  @Test
+  void negativeScramMaxIterationsIsRejected() throws SQLException {
+    createRole("scram_iterations");
+
+    Properties props = new Properties();
+    PGProperty.USER.set(props, ROLE_NAME);
+    PGProperty.PASSWORD.set(props, "scram_iterations");
+    PGProperty.SCRAM_MAX_ITERATIONS.set(props, -1);
+
+    SQLException ex = assertThrows(SQLException.class, () -> TestUtil.openDB(props));
+    assertTrue(ex.getMessage().contains("must be a non-negative integer"),
+        "Unexpected message: " + ex.getMessage());
+    assertEquals(PSQLState.INVALID_PARAMETER_VALUE.getState(), ex.getSQLState());
   }
 
   private void createRole(String passwd) throws SQLException {

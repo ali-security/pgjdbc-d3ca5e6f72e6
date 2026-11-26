@@ -890,6 +890,8 @@ public class ConnectionFactoryImpl extends ConnectionFactory {
                 break;
 
               case AUTH_REQ_SASL:
+                int scramMaxIterations = ScramAuthenticator.maxIterations(info);
+
                 scramAuthenticator = AuthenticationPluginManager.withPassword(AuthenticationRequestType.SASL, info, password -> {
                   if (password == null) {
                     throw new PSQLException(
@@ -903,7 +905,7 @@ public class ConnectionFactoryImpl extends ConnectionFactory {
                             "The server requested SCRAM-based authentication, but the password is an empty string."),
                         PSQLState.CONNECTION_REJECTED);
                   }
-                  return new ScramAuthenticator(password, pgStream, info);
+                  return new ScramAuthenticator(password, pgStream, info, scramMaxIterations);
                 });
                 scramAuthenticator.handleAuthenticationSASL();
                 break;

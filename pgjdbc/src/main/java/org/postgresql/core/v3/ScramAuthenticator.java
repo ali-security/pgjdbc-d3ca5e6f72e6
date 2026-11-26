@@ -5,6 +5,7 @@
 
 package org.postgresql.core.v3;
 
+import org.postgresql.PGProperty;
 import org.postgresql.core.PGStream;
 import org.postgresql.util.GT;
 import org.postgresql.util.PSQLException;
@@ -13,6 +14,7 @@ import org.postgresql.util.PSQLState;
 import com.ongres.scram.client.ScramClient;
 import com.ongres.scram.common.ClientFinalMessage;
 import com.ongres.scram.common.ClientFirstMessage;
+import com.ongres.scram.common.ServerFirstMessage;
 import com.ongres.scram.common.StringPreparation;
 import com.ongres.scram.common.exception.ScramException;
 import com.ongres.scram.common.util.TlsServerEndpoint;
@@ -38,10 +40,28 @@ final class ScramAuthenticator {
 
   private final PGStream pgStream;
   private final ScramClient scramClient;
+  private final int maxIterations;
 
   ScramAuthenticator(char[] password, PGStream pgStream, Properties info) throws PSQLException {
+    this(password, pgStream, info, maxIterations(info));
+  }
+
+  ScramAuthenticator(char[] password, PGStream pgStream, Properties info, int maxIterations)
+      throws PSQLException {
     this.pgStream = pgStream;
+    this.maxIterations = maxIterations;
     this.scramClient = initializeScramClient(password, pgStream, info);
+  }
+
+  static int maxIterations(Properties info) throws PSQLException {
+    int maxIterations = PGProperty.SCRAM_MAX_ITERATIONS.getInt(info);
+    if (maxIterations < 0) {
+      throw new PSQLException(
+          GT.tr("{0} must be a non-negative integer, but was: {1}",
+              PGProperty.SCRAM_MAX_ITERATIONS.getName(), maxIterations),
+          PSQLState.INVALID_PARAMETER_VALUE);
+    }
+    return maxIterations;
   }
 
   private static ScramClient initializeScramClient(char[] password, PGStream stream, Properties info) throws PSQLException {
@@ -147,13 +167,24 @@ final class ScramAuthenticator {
   void handleAuthenticationSASLContinue(int length) throws IOException, PSQLException {
     String receivedServerFirstMessage = pgStream.receiveString(length);
     LOGGER.log(Level.FINEST, " <=BE AuthenticationSASLContinue( {0} )", receivedServerFirstMessage);
+    ServerFirstMessage serverFirstMessage;
     try {
-      scramClient.serverFirstMessage(receivedServerFirstMessage);
+      serverFirstMessage = scramClient.serverFirstMessage(receivedServerFirstMessage);
     } catch (ScramException | IllegalStateException | IllegalArgumentException e) {
       throw new PSQLException(
           GT.tr("SCRAM authentication failed: {0}", e.getMessage()),
           PSQLState.CONNECTION_REJECTED,
           e);
+    }
+
+    int iterations = serverFirstMessage.getIterationCount();
+    if (maxIterations > 0 && iterations > maxIterations) {
+      throw new PSQLException(
+          GT.tr("Server requested {0} SCRAM PBKDF2 iterations, which exceeds the "
+              + "client-side limit of {1}. If you trust this server, raise the "
+              + "{2} connection property.",
+              iterations, maxIterations, PGProperty.SCRAM_MAX_ITERATIONS.getName()),
+          PSQLState.CONNECTION_REJECTED);
     }
 
     ClientFinalMessage clientFinalMessage = scramClient.clientFinalMessage();
