@@ -210,11 +210,17 @@ class SimpleParameterList implements V3ParameterList {
    * {}
    * </pre>
    **/
-  private static String quoteAndCast(String text, @Nullable String type, boolean standardConformingStrings) {
+  private static String quoteAndCast(String text, @Nullable String type) {
     StringBuilder sb = new StringBuilder((text.length() + 10) / 10 * 11); // Add 10% for escaping.
-    sb.append("('");
+    // The driver's standard_conforming_strings can be out of date when the backend parses the
+    // literal, so a value with a backslash is sent as E'', which the backend reads the same way
+    // under either setting.
+    // The EUC_JP and Shift_JIS charsets encode the yen sign as a backslash.
+    boolean hasBackslash = text.indexOf('\\') >= 0
+        || text.indexOf('\u00a5') >= 0; // yen sign
+    sb.append(hasBackslash ? "(E'" : "('");
     try {
-      Utils.escapeLiteral(sb, text, standardConformingStrings);
+      Utils.escapeLiteral(sb, text, !hasBackslash);
     } catch (SQLException e) {
       // This should only happen if we have an embedded null
       // and there's not much we can do if we do hit one.
@@ -392,7 +398,7 @@ class SimpleParameterList implements V3ParameterList {
           type = null;
       }
     }
-    return quoteAndCast(textValue, type, standardConformingStrings);
+    return quoteAndCast(textValue, type);
   }
 
   @Override
