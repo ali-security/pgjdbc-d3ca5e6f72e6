@@ -112,7 +112,9 @@ public class BatchResultHandler extends ResultHandlerBase {
     try {
       return pgStatement.getConnection().getAutoCommit();
     } catch (SQLException e) {
-      assert false : "pgStatement.getConnection().getAutoCommit() should not throw";
+      // getAutoCommit() throws when the connection is already closed (for instance, the driver
+      // closed it after a batch entry failed while it was being sent). There is nothing to secure
+      // in that case, so treat it as not auto-commit rather than failing with an assertion.
       return false;
     }
   }

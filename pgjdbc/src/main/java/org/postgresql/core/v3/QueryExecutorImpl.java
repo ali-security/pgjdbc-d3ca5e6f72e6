@@ -419,6 +419,10 @@ public class QueryExecutorImpl extends QueryExecutorBase {
         handler.handleError(
             new PSQLException(GT.tr("An I/O error occurred while sending to the backend."),
                 PSQLState.CONNECTION_FAILURE, e));
+      } catch (Throwable e) {
+        // The send buffer can hold part of a message, or the reply can be partly unread.
+        abort();
+        throw e;
       }
 
       try {
@@ -609,6 +613,10 @@ public class QueryExecutorImpl extends QueryExecutorBase {
         handler.handleError(
             new PSQLException(GT.tr("An I/O error occurred while sending to the backend."),
                 PSQLState.CONNECTION_FAILURE, e));
+      } catch (Throwable e) {
+        // The send buffer can hold part of a message, or the reply can be partly unread.
+        abort();
+        throw e;
       }
 
       try {
@@ -2073,7 +2081,14 @@ public class QueryExecutorImpl extends QueryExecutorBase {
   }
 
   private void sendSimpleQuery(SimpleQuery query, SimpleParameterList params) throws IOException {
-    String nativeSql = query.toString(params);
+    String nativeSql;
+    try {
+      nativeSql = query.toString(params);
+    } catch (Exception e) {
+      // Report it like a failed Bind, so the caller reads the replies to what was already sent.
+      Throwable cause = e.getCause();
+      throw new PGBindException(cause instanceof IOException ? (IOException) cause : new IOException(e));
+    }
 
     LOGGER.log(Level.FINEST, " FE=> SimpleQuery(query=\"{0}\")", nativeSql);
     Encoding encoding = pgStream.getEncoding();
@@ -2646,6 +2661,10 @@ public class QueryExecutorImpl extends QueryExecutorBase {
         handler.handleError(
             new PSQLException(GT.tr("An I/O error occurred while sending to the backend."),
                 PSQLState.CONNECTION_FAILURE, e));
+      } catch (Throwable e) {
+        // The send buffer can hold part of a message, or the reply can be partly unread.
+        abort();
+        throw e;
       }
 
       handler.handleCompletion();
